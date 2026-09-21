@@ -10,13 +10,31 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 
 DEVICE_TYPES = ["CNC", "RobotArm", "Conveyor", "AGV", "InjectionMolding", "QCStation"]
 STATUSES = ["RUNNING", "IDLE", "FAULT", "OFFLINE"]
+# 产线区域（每3台设备一个区）与班次（白班/夜班/晚班）
+DEVICE_AREAS = ["A区", "B区", "C区", "D区"]
+SHIFTS = ["白班", "夜班", "晚班"]
 ACTIVE_CLIENTS: list[WebSocket] = []
 SIMULATOR_RUNNING = True
+
+
+def area_of(did: int) -> str:
+    return DEVICE_AREAS[min((did - 1) // 3, len(DEVICE_AREAS) - 1)]
+
+
+def shift_of(ts: float) -> str:
+    hour = time.localtime(ts).tm_hour
+    if 8 <= hour < 16:
+        return "白班"
+    if 16 <= hour < 24:
+        return "夜班"
+    return "晚班"
+
 
 class DeviceState:
     def __init__(self, did: int, dtype: str, x: float, y: float, z: float):
         self.id = did
         self.type = dtype
+        self.area = area_of(did)
         self.status = "RUNNING"
         self.position = [x, y, z]
         self.temperature = random.uniform(35, 45)
@@ -30,7 +48,7 @@ class DeviceState:
 
     def to_dict(self):
         return {
-            "id": self.id, "type": self.type, "status": self.status,
+            "id": self.id, "type": self.type, "area": self.area, "status": self.status,
             "position": self.position, "temperature": round(self.temperature, 2),
             "vibration": round(self.vibration, 3), "pressure": round(self.pressure, 2),
             "production_count": self.production_count, "fault_count": self.fault_count,
@@ -42,6 +60,21 @@ devices = {i: DeviceState(i, random.choice(DEVICE_TYPES),
 
 production_log = []
 anomaly_log = []
+
+# 故障分布：按 设备类型 / 产线区域 / 班次 三种维度增量统计
+# 计数只在 fault_count 自增时同步 +1，保证任意维度各段之和 == 故障总数
+fault_stats = {"type": defaultdict(int), "area": defaultdict(int), "shift": defaultdict(int)}
+
+
+def record_fault(dev: DeviceState):
+    ts = time.time()
+    fault_stats["type"][dev.type] += 1
+    fault_stats["area"][dev.area] += 1
+    fault_stats["shift"][shift_of(ts)] += 1
+
+
+def get_fault_stats():
+    return {dim: dict(counts) for dim, counts in fault_stats.items()}
 
 class AnomalyRules:
     def __init__(self):
@@ -69,7 +102,9 @@ class AnomalyRules:
                 triggers.append({"device_id": dev.id, "rule": "温度趋势上升", "value": round(np.mean(vals[-4:]), 2), "threshold": ">3°C/周期"})
 
         if triggers:
-            anomaly_log.append({"timestamp": time.time(), "triggers": triggers, "device_type": dev.type})
+            ts = time.time()
+            anomaly_log.append({"timestamp": ts, "triggers": triggers, "device_type": dev.type,
+                                "device_id": dev.id, "area": dev.area, "shift": shift_of(ts)})
         return triggers
 
 rules_engine = AnomalyRules()
@@ -89,6 +124,7 @@ def simulate():
             if random.random() < 0.015:
                 dev.status = "FAULT"
                 dev.fault_count += 1
+                record_fault(dev)
             elif random.random() < 0.03 and dev.status == "FAULT":
                 dev.status = "RUNNING"
 
@@ -107,7 +143,8 @@ def simulate():
             payload = {
                 "devices": [d.to_dict() for d in devices.values()],
                 "production": sum(d.production_count for d in devices.values()),
-                "anomalies": anomaly_log[-5:] if anomaly_log else [],
+                "anomalies": list(reversed(anomaly_log[-30:])),
+                "fault_stats": get_fault_stats(),
                 "oee": calculate_oee()
             }
             msg = json.dumps(payload)
@@ -157,7 +194,8 @@ async def startup():
 
 @app.get("/api/devices")
 def get_devices():
-    return {"devices": [d.to_dict() for d in devices.values()], "anomalies": anomaly_log[-10:]}
+    return {"devices": [d.to_dict() for d in devices.values()],
+            "anomalies": anomaly_log[-30:], "fault_stats": get_fault_stats()}
 
 
 @app.get("/api/oee")

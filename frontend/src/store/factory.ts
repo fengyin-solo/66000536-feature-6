@@ -1,11 +1,24 @@
 import { defineStore } from 'pinia'
-import { ref, onUnmounted } from 'vue'
-import type { FactoryData } from '@/types'
+import { ref, watch, onUnmounted } from 'vue'
+import type { FactoryData, FaultGroupBy } from '@/types'
+
+const GROUP_KEY = 'fault-group-by'
+const VALID_GROUPS: FaultGroupBy[] = ['type', 'area', 'shift']
+
+function loadGroupBy(): FaultGroupBy {
+  const v = localStorage.getItem(GROUP_KEY) as FaultGroupBy | null
+  return v && VALID_GROUPS.includes(v) ? v : 'type'
+}
 
 export const useFactoryStore = defineStore('factory', () => {
   const data = ref<FactoryData | null>(null)
   const ws = ref<WebSocket | null>(null)
   const connected = ref(false)
+  // 故障分布图的当前分组维度（刷新后保留）与选中的组
+  const faultGroupBy = ref<FaultGroupBy>(loadGroupBy())
+  const selectedFaultGroup = ref<string | null>(null)
+
+  watch(faultGroupBy, (v) => localStorage.setItem(GROUP_KEY, v))
 
   function connect() {
     if (ws.value) return
@@ -25,5 +38,5 @@ export const useFactoryStore = defineStore('factory', () => {
     connected.value = false
   }
 
-  return { data, connected, connect, disconnect }
+  return { data, connected, faultGroupBy, selectedFaultGroup, connect, disconnect }
 })
